@@ -1,31 +1,39 @@
 
-import streamlit as st
 import os
-from semantic_rag import expanded_hybrid_search
-
-from rag_engine import chunk_document
-from semantic_rag import hybrid_search_document
-
-from semantic_rag import (
-    index_document,
-    answer_with_semantic_rag
-)
+import streamlit as st
 
 from ollama import Client
 
 from document_processor import (
     extract_pdf_text,
     answer_document_question,
-    extract_financial_data
+    extract_financial_data,
 )
 
-from document_processor import (
-    extract_pdf_text,
-    answer_document_question
+from rag_engine import chunk_document
+
+from semantic_rag import (
+    index_document,
+    answer_with_semantic_rag,
+    hybrid_search_document,
+    expanded_hybrid_search,
 )
 
+from financial_data_mapper import map_extracted_financial_data
+from financial_analyzer import analyze_finances
+from financial_insights import generate_financial_insights
+from financial_dashboard import display_financial_dashboard
 
-# Ollama configuration
+
+# --------------------------------------------------
+# 1. APPLICATION CONFIGURATION
+# --------------------------------------------------
+
+st.set_page_config(
+    page_title="Personal Finance AI Assistant",
+    page_icon="💰",
+    layout="wide",
+)
 
 OLLAMA_HOST = os.getenv(
     "OLLAMA_HOST",
@@ -40,110 +48,154 @@ MODEL = os.getenv(
 client = Client(host=OLLAMA_HOST)
 
 
-# Session state
+# --------------------------------------------------
+# 2. SESSION STATE INITIALISATION
+# --------------------------------------------------
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+DEFAULT_STATE = {
+    "document_text": "",
+    "document_name": "",
+    "document_chunks": [],
+    "semantic_document_id": "",
+    "financial_data": None,
+    "document_answer": "",
+    "semantic_result": None,
+    "hybrid_results": None,
+    "advanced_answer": None,
+    "advanced_sources": [],
+    "messages": [],
+    "conversation_summary": "",
+}
 
-if "hybrid_results" not in st.session_state:
-    st.session_state.hybrid_results = None
-
-if "semantic_document_id" not in st.session_state:
-    st.session_state.semantic_document_id = ""
-
-if "semantic_result" not in st.session_state:
-    st.session_state.semantic_result = None
-
-if "conversation_summary" not in st.session_state:
-    st.session_state.conversation_summary = ""
-
-if "document_text" not in st.session_state:
-    st.session_state.document_text = ""
-
-if "document_name" not in st.session_state:
-    st.session_state.document_name = ""
-
-if "document_answer" not in st.session_state:
-    st.session_state.document_answer = ""
+for key, default_value in DEFAULT_STATE.items():
+    if key not in st.session_state:
+        st.session_state[key] = default_value
 
 
-# Application interface
+# --------------------------------------------------
+# 3. APPLICATION HEADER
+# --------------------------------------------------
 
-st.title("Personal Finance AI Assistant")
+st.title("💰 Personal Finance AI Assistant")
 
 st.write(
-    "AI-powered personal finance and document analysis."
+    "AI-powered personal finance and financial document intelligence."
+)
+
+st.caption(
+    f"AI Model: {MODEL} | Ollama Server: {OLLAMA_HOST}"
 )
 
 
-# PDF upload
+# --------------------------------------------------
+# 4. PDF UPLOAD AND DOCUMENT PROCESSING
+# --------------------------------------------------
 
-st.sidebar.header("Document Intelligence")
+st.sidebar.header("📄 Document Intelligence")
 
 uploaded_pdf = st.sidebar.file_uploader(
     "Upload a financial PDF",
-    type=["pdf"]
+    type=["pdf"],
 )
 
-if st.sidebar.button("Extract PDF Text"):
+if st.sidebar.button(
+    "Extract and Index PDF",
+    use_container_width=True,
+):
 
     if uploaded_pdf is None:
-        st.sidebar.warning("Please upload a PDF first.")
+
+        st.sidebar.warning(
+            "Please upload a PDF first."
+        )
 
     elif uploaded_pdf.size > 10 * 1024 * 1024:
-        st.sidebar.error("Maximum PDF size is 10 MB.")
+
+        st.sidebar.error(
+            "Maximum PDF size is 10 MB."
+        )
 
     else:
+
         try:
+
             with st.spinner("Extracting PDF text..."):
 
                 extracted_text = extract_pdf_text(
                     uploaded_pdf
                 )
 
-                st.session_state.document_text = extracted_text
-                st.session_state.document_name = uploaded_pdf.name
+                if not extracted_text.strip():
+                    raise ValueError(
+                        "No readable text was found in this PDF."
+                    )
 
-                st.session_state.document_answer = ""
+            with st.spinner("Creating document chunks..."):
 
-            st.success("PDF extracted successfully!")
+                chunks = chunk_document(
+                    extracted_text,
+                    chunk_size=1200,
+                    overlap=200,
+                )
 
-        except Exception as error:
-            st.error(f"PDF extraction failed: {error}")
-        # Create document chunks
+                if not chunks:
+                    raise ValueError(
+                        "No document chunks were created."
+                    )
 
-        chunks = chunk_document(
-            extracted_text,
-            chunk_size=1200,
-            overlap=200
-        )
+            with st.spinner(
+                "Creating semantic embeddings and indexing..."
+            ):
 
-        # Index document in ChromaDB
+                document_id = index_document(
+                    client,
+                    chunks,
+                    extracted_text,
+                )
 
-        with st.spinner("Creating semantic embeddings..."):
+            # Update document state only after successful indexing
 
-            document_id = index_document(
-                client,
-                chunks,
-                extracted_text
+            st.session_state.document_text = extracted_text
+            st.session_state.document_name = uploaded_pdf.name
+            st.session_state.document_chunks = chunks
+            st.session_state.semantic_document_id = document_id
+
+            # Reset results belonging to the previous document
+
+            st.session_state.financial_data = None
+            st.session_state.document_answer = ""
+            st.session_state.semantic_result = None
+            st.session_state.hybrid_results = None
+            st.session_state.advanced_answer = None
+            st.session_state.advanced_sources = []
+
+            st.success(
+                "PDF extracted and indexed successfully!"
             )
 
-        st.session_state.semantic_document_id = document_id
-        st.session_state.document_chunks = chunks
-        st.session_state.document_answer = ""
-        st.session_state.financial_data = None
-        st.session_state.rag_result = None
+        except Exception as error:
 
-# Document preview
-st.session_state.financial_data = None
-st.session_state.hybrid_results = None
+            st.error(
+                f"Document processing failed: {error}"
+            )
+
+
+# --------------------------------------------------
+# 5. DOCUMENT PREVIEW
+# --------------------------------------------------
 
 if st.session_state.document_text:
 
-    st.subheader("Uploaded Document")
+    st.divider()
+
+    st.subheader("📄 Uploaded Document")
 
     st.caption(
         f"Document: {st.session_state.document_name}"
+    )
+
+    st.caption(
+        f"Indexed chunks: {len(st.session_state.document_chunks)}"
     )
 
     with st.expander("View extracted document text"):
@@ -152,21 +204,26 @@ if st.session_state.document_text:
             "Extracted content",
             value=st.session_state.document_text[:10000],
             height=300,
-            disabled=True
+            disabled=True,
         )
 
-    # Structured financial data extraction
+
+# --------------------------------------------------
+# 6. FINANCIAL INFORMATION EXTRACTION
+# --------------------------------------------------
 
 st.divider()
 
-st.subheader("📊 Extract Financial Information")
+st.header("📊 Financial Information Extraction")
 
 if st.button(
     "Extract Financial Data",
-    use_container_width=True
+    use_container_width=True,
+    disabled=not bool(st.session_state.document_text),
 ):
 
     try:
+
         with st.spinner(
             "Qwen is extracting financial information..."
         ):
@@ -174,87 +231,168 @@ if st.button(
             financial_data = extract_financial_data(
                 client,
                 MODEL,
-                st.session_state.document_text
+                st.session_state.document_text,
             )
 
             st.session_state.financial_data = financial_data
 
     except Exception as error:
-        st.error(f"Financial extraction failed: {error}")
 
-
-if st.session_state.get("financial_data"):
-
-    st.markdown("### Extracted Financial Data")
-
-    st.json(st.session_state.financial_data)
-    # Document question answering
-
-    st.subheader("Ask Questions About Your Document")
-
-    with st.form("document_question_form"):
-
-        document_question = st.text_input(
-            "Your question",
-            placeholder="What is the total monthly expenditure?"
+        st.error(
+            f"Financial extraction failed: {error}"
         )
 
-        ask_button = st.form_submit_button("Ask AI")
 
-    if ask_button:
+if st.session_state.financial_data:
 
-        if not document_question.strip():
-            st.warning("Please enter a question.")
+    st.subheader("Extracted Financial Data")
 
-        else:
-            try:
-                with st.spinner("Qwen is analysing your document..."):
+    st.json(
+        st.session_state.financial_data
+    )
 
-                    answer = answer_document_question(
-                        client,
-                        MODEL,
-                        st.session_state.document_text,
-                        document_question
-                    )
 
-                    st.session_state.document_answer = answer
-
-            except Exception as error:
-                st.error(
-                    f"Document analysis failed: {error}"
-                )
-
-    if st.session_state.document_answer:
-
-        st.markdown("### AI Analysis")
-
-        st.write(
-            st.session_state.document_answer
-        )
-
-if "financial_data" not in st.session_state:
-    st.session_state.financial_data = None
-
-# Semantic RAG
+# --------------------------------------------------
+# 7. DOCUMENT QUESTION ANSWERING
+# --------------------------------------------------
 
 st.divider()
 
-st.subheader("🧠 Semantic Financial Document Search")
+st.header("💬 Ask Questions About Your Document")
 
-semantic_question = st.text_input(
-    "Ask a question using semantic search",
-    key="semantic_question"
-)
+with st.form("document_question_form"):
 
-if st.button("Search with Semantic RAG"):
+    document_question = st.text_input(
+        "Your question",
+        placeholder="What is the personal loan balance?",
+    )
 
-    if not semantic_question.strip():
+    ask_document_button = st.form_submit_button(
+        "Ask AI",
+        disabled=not bool(st.session_state.document_text),
+    )
 
-        st.warning("Please enter a question.")
+
+if ask_document_button:
+
+    if not document_question.strip():
+
+        st.warning(
+            "Please enter a question."
+        )
 
     else:
 
         try:
+
+            with st.spinner(
+                "Qwen is analysing your document..."
+            ):
+
+                answer = answer_document_question(
+                    client,
+                    MODEL,
+                    st.session_state.document_text,
+                    document_question,
+                )
+
+                st.session_state.document_answer = answer
+
+        except Exception as error:
+
+            st.error(
+                f"Document analysis failed: {error}"
+            )
+
+
+if st.session_state.document_answer:
+
+    st.subheader("AI Document Analysis")
+
+    st.write(
+        st.session_state.document_answer
+    )
+
+
+# --------------------------------------------------
+# 8. FINANCIAL INTELLIGENCE DASHBOARD
+# --------------------------------------------------
+
+st.divider()
+
+st.header("📈 Financial Intelligence Dashboard")
+
+if st.session_state.financial_data:
+
+    try:
+
+        mapped_data = map_extracted_financial_data(
+            st.session_state.financial_data
+        )
+
+        analysis = analyze_finances(
+            mapped_data
+        )
+
+        insights = generate_financial_insights(
+            analysis
+        )
+
+        display_financial_dashboard(
+            analysis,
+            insights,
+        )
+
+        with st.expander("View mapped financial data"):
+
+            st.json(mapped_data)
+
+        with st.expander("View calculated financial analysis"):
+
+            st.json(analysis)
+
+    except Exception as error:
+
+        st.error(
+            f"Financial dashboard failed: {error}"
+        )
+
+else:
+
+    st.info(
+        "Extract financial information from a PDF "
+        "to generate your financial dashboard."
+    )
+
+
+# --------------------------------------------------
+# 9. SEMANTIC RAG
+# --------------------------------------------------
+
+st.divider()
+
+st.header("🧠 Semantic Financial Document Search")
+
+semantic_question = st.text_input(
+    "Ask a question using semantic search",
+    key="semantic_question",
+)
+
+if st.button(
+    "Search with Semantic RAG",
+    disabled=not bool(st.session_state.semantic_document_id),
+):
+
+    if not semantic_question.strip():
+
+        st.warning(
+            "Please enter a question."
+        )
+
+    else:
+
+        try:
+
             with st.spinner(
                 "Searching semantic vectors and analysing..."
             ):
@@ -264,18 +402,21 @@ if st.button("Search with Semantic RAG"):
                     MODEL,
                     semantic_question,
                     st.session_state.semantic_document_id,
-                    top_k=3
+                    top_k=3,
                 )
 
                 st.session_state.semantic_result = semantic_result
 
         except Exception as error:
-            st.error(f"Semantic RAG failed: {error}")
+
+            st.error(
+                f"Semantic RAG failed: {error}"
+            )
 
 
-if st.session_state.get("semantic_result"):
+if st.session_state.semantic_result:
 
-    st.markdown("### Semantic AI Answer")
+    st.subheader("Semantic AI Answer")
 
     st.write(
         st.session_state.semantic_result["answer"]
@@ -285,59 +426,79 @@ if st.session_state.get("semantic_result"):
 
         for source in st.session_state.semantic_result["sources"]:
 
-            st.write(f"Page: {source['page']}")
+            st.write(
+                f"Page: {source['page']}"
+            )
 
             st.write(
                 f"Cosine distance: {source['distance']:.4f}"
             )
 
-            st.write(source["text"])
+            st.write(
+                source["text"]
+            )
 
             st.divider()
 
-# Hybrid retrieval
+
+# --------------------------------------------------
+# 10. HYBRID RETRIEVAL
+# --------------------------------------------------
 
 st.divider()
 
-st.subheader("🔀 Hybrid Financial Document Search")
+st.header("🔀 Hybrid Financial Document Search")
 
 hybrid_question = st.text_input(
     "Ask a question using keyword + semantic search",
-    key="hybrid_question"
+    key="hybrid_question",
 )
 
-if st.button("Run Hybrid Search"):
+if st.button(
+    "Run Hybrid Search",
+    disabled=not bool(st.session_state.semantic_document_id),
+):
 
     if not hybrid_question.strip():
 
-        st.warning("Please enter a question.")
+        st.warning(
+            "Please enter a question."
+        )
 
     else:
 
         try:
-            with st.spinner("Combining retrieval results..."):
+
+            with st.spinner(
+                "Combining keyword and semantic retrieval..."
+            ):
 
                 hybrid_results = hybrid_search_document(
                     client,
                     hybrid_question,
                     st.session_state.semantic_document_id,
                     st.session_state.document_chunks,
-                    top_k=3
+                    top_k=3,
                 )
 
                 st.session_state.hybrid_results = hybrid_results
 
         except Exception as error:
-            st.error(f"Hybrid search failed: {error}")
+
+            st.error(
+                f"Hybrid search failed: {error}"
+            )
 
 
-if st.session_state.get("hybrid_results"):
+if st.session_state.hybrid_results:
 
-    st.markdown("### Hybrid Search Results")
+    st.subheader("Hybrid Search Results")
 
     for result in st.session_state.hybrid_results:
 
-        st.write(f"Page: {result['page']}")
+        st.write(
+            f"Page: {result['page']}"
+        )
 
         st.write(
             f"RRF score: {result['rrf_score']:.5f}"
@@ -347,75 +508,163 @@ if st.session_state.get("hybrid_results"):
             "Retrieved by: " + ", ".join(result["methods"])
         )
 
-        st.write(result["text"])
+        st.write(
+            result["text"]
+        )
 
         st.divider()
 
 
-st.divider()
-st.header("Advanced Financial Document Q&A")
+# --------------------------------------------------
+# 11. EXPANDED HYBRID RETRIEVAL + AI ANSWERING
+# --------------------------------------------------
 
-if (
-    "document_chunks" in st.session_state
-    and st.session_state.document_chunks
-    and "semantic_document_id" in st.session_state
-    and st.session_state.semantic_document_id
+st.divider()
+
+st.header("🚀 Advanced Financial Document Q&A")
+
+advanced_question = st.text_input(
+    "Ask a question using expanded hybrid retrieval",
+    key="advanced_question",
+)
+
+if st.button(
+    "Search and Answer",
+    disabled=not bool(st.session_state.semantic_document_id),
 ):
-    advanced_question = st.text_input(
-        "Ask a question using expanded hybrid retrieval",
-        key="advanced_question"
+
+    if not advanced_question.strip():
+
+        st.warning(
+            "Please enter a question."
+        )
+
+    else:
+
+        try:
+
+            with st.spinner(
+                "Expanding query and searching financial document..."
+            ):
+
+                results = expanded_hybrid_search(
+                    client,
+                    MODEL,
+                    advanced_question,
+                    st.session_state.semantic_document_id,
+                    st.session_state.document_chunks,
+                    top_k=3,
+                )
+
+                if not results:
+                    raise ValueError(
+                        "No relevant passages were retrieved."
+                    )
+
+                context = "\n\n".join(
+                    [
+                        f"Page {item['page']}:\n{item['text']}"
+                        for item in results
+                    ]
+                )
+
+            with st.spinner(
+                "Qwen is preparing your answer..."
+            ):
+
+                response = client.chat(
+                    model=MODEL,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a financial document assistant. "
+                                "Answer only using the supplied document passages. "
+                                "Do not invent financial figures. "
+                                "If information is unavailable, say so. "
+                                "Distinguish balances, income, expenses, "
+                                "interest rates and percentages. "
+                                "Mention the relevant page numbers. "
+                                "Do not provide unsupported financial advice."
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": (
+                                f"Question: {advanced_question}\n\n"
+                                f"Document passages:\n{context}"
+                            ),
+                        },
+                    ],
+                )
+
+                st.session_state.advanced_answer = (
+                    response["message"]["content"]
+                )
+
+                st.session_state.advanced_sources = results
+
+        except Exception as error:
+
+            st.error(
+                f"Advanced document analysis failed: {error}"
+            )
+
+
+if st.session_state.advanced_answer:
+
+    st.subheader("AI Financial Analysis")
+
+    st.write(
+        st.session_state.advanced_answer
     )
 
-    if st.button("Search and Answer") and advanced_question:
-        with st.spinner("Searching financial document..."):
+    with st.expander("View retrieved evidence"):
 
-            results = expanded_hybrid_search(
-                client,
-                MODEL,
-                advanced_question,
-                st.session_state.semantic_document_id,
-                st.session_state.document_chunks,
-                top_k=3
+        for item in st.session_state.advanced_sources:
+
+            st.write(
+                f"Page: {item['page']}"
             )
 
-            context = "\n\n".join(
-                [
-                    f"Page {item['page']}:\n{item['text']}"
-                    for item in results
-                ]
+            st.write(
+                item["text"]
             )
 
-            response = client.chat(
-                model=MODEL,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a financial document assistant. "
-                            "Answer only using the supplied document passages. "
-                            "Do not invent financial figures. "
-                            "If the information is unavailable, say so. "
-                            "Mention the relevant page number."
-                        )
-                    },
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Question: {advanced_question}\n\n"
-                            f"Document passages:\n{context}"
-                        )
-                    }
-                ]
+            st.caption(
+                f"RRF score: {item['rrf_score']:.5f} | "
+                f"Methods: {item['methods']}"
             )
 
-        st.subheader("Answer")
-        st.write(response["message"]["content"])
+            st.divider()
 
-        with st.expander("Retrieved evidence"):
-            for item in results:
-                st.write(f"**Page {item['page']}**")
-                st.write(item["text"])
-                st.caption(
-                    f"RRF: {item['rrf_score']:.5f} | "
-                    f"Methods: {item['methods']}"
-                )
+
+# --------------------------------------------------
+# 12. SIDEBAR STATUS
+# --------------------------------------------------
+
+st.sidebar.divider()
+
+st.sidebar.subheader("Application Status")
+
+st.sidebar.write(
+    f"Model: {MODEL}"
+)
+
+st.sidebar.write(
+    f"Document loaded: {'Yes' if st.session_state.document_text else 'No'}"
+)
+
+st.sidebar.write(
+    f"Financial data extracted: {'Yes' if st.session_state.financial_data else 'No'}"
+)
+
+if st.sidebar.button(
+    "Clear Current Document",
+    use_container_width=True,
+):
+
+    for key, default_value in DEFAULT_STATE.items():
+        st.session_state[key] = default_value
+
+    st.rerun()
